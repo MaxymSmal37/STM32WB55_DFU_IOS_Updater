@@ -15,3 +15,4 @@ struct STM32WB55_OTA_UpdaterApp: App {
         }
     }
 }
+
