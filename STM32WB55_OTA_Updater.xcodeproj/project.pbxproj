@@ -8,6 +8,7 @@
 
 /* Begin PBXFileReference section */
 		B05ADDA2307F8A9100FE06AE /* STM32WB55_OTA_Updater.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = STM32WB55_OTA_Updater.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000001 /* STM32WB55_OTA_UpdaterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = STM32WB55_OTA_UpdaterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,13 +17,30 @@
 			path = STM32WB55_OTA_Updater;
 			sourceTree = "<group>";
 		};
+		A10000000000000000000002 /* STM32WB55_OTA_UpdaterTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = STM32WB55_OTA_UpdaterTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000003 /* STM32WB55_OTA_Updater.app in Frameworks */ = {isa = PBXBuildFile; fileRef = B05ADDA2307F8A9100FE06AE /* STM32WB55_OTA_Updater.app */; };
+/* End PBXBuildFile section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		B05ADD9F307F8A9100FE06AE /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000003 /* STM32WB55_OTA_Updater.app in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -33,6 +51,7 @@
 			isa = PBXGroup;
 			children = (
 				B05ADDA4307F8A9100FE06AE /* STM32WB55_OTA_Updater */,
+				A10000000000000000000002 /* STM32WB55_OTA_UpdaterTests */,
 				B05ADDA3307F8A9100FE06AE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +60,7 @@
 			isa = PBXGroup;
 			children = (
 				B05ADDA2307F8A9100FE06AE /* STM32WB55_OTA_Updater.app */,
+				A10000000000000000000001 /* STM32WB55_OTA_UpdaterTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -70,7 +90,48 @@
 			productReference = B05ADDA2307F8A9100FE06AE /* STM32WB55_OTA_Updater.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A10000000000000000000005 /* STM32WB55_OTA_UpdaterTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000012 /* Build configuration list for PBXNativeTarget "STM32WB55_OTA_UpdaterTests" */;
+			buildPhases = (
+				A10000000000000000000006 /* Sources */,
+				A10000000000000000000004 /* Frameworks */,
+				A10000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10000000000000000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000000002 /* STM32WB55_OTA_UpdaterTests */,
+			);
+			name = STM32WB55_OTA_UpdaterTests;
+			packageProductDependencies = (
+			);
+			productName = STM32WB55_OTA_UpdaterTests;
+			productReference = A10000000000000000000001 /* STM32WB55_OTA_UpdaterTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		A10000000000000000000009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B05ADD9A307F8A9100FE06AE /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B05ADDA1307F8A9100FE06AE;
+			remoteInfo = STM32WB55_OTA_Updater;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		A10000000000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B05ADDA1307F8A9100FE06AE /* STM32WB55_OTA_Updater */;
+			targetProxy = A10000000000000000000009 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXProject section */
 		B05ADD9A307F8A9100FE06AE /* Project object */ = {
@@ -100,6 +161,7 @@
 			projectRoot = "";
 			targets = (
 				B05ADDA1307F8A9100FE06AE /* STM32WB55_OTA_Updater */,
+				A10000000000000000000005 /* STM32WB55_OTA_UpdaterTests */,
 			);
 		};
 /* End PBXProject section */
@@ -117,6 +179,20 @@
 /* Begin PBXSourcesBuildPhase section */
 		B05ADD9E307F8A9100FE06AE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -257,7 +333,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Used for connection for STM32";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Bluetooth is used to find, connect to, and update STM32 devices.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -291,7 +367,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Used for connection for STM32";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Bluetooth is used to find, connect to, and update STM32 devices.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -314,6 +390,36 @@
 			};
 			name = Release;
 		};
+		A10000000000000000000010 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
+				PRODUCT_BUNDLE_IDENTIFIER = "max37.STM32WB55-OTA-UpdaterTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/STM32WB55_OTA_Updater.app/STM32WB55_OTA_Updater";
+			};
+			name = Debug;
+		};
+		A10000000000000000000011 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
+				PRODUCT_BUNDLE_IDENTIFIER = "max37.STM32WB55-OTA-UpdaterTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/STM32WB55_OTA_Updater.app/STM32WB55_OTA_Updater";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -331,6 +437,15 @@
 			buildConfigurations = (
 				B05ADDAE307F8A9300FE06AE /* Debug */,
 				B05ADDAF307F8A9300FE06AE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000012 /* Build configuration list for PBXNativeTarget "STM32WB55_OTA_UpdaterTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000010 /* Debug */,
+				A10000000000000000000011 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
