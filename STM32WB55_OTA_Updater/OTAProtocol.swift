@@ -55,6 +55,7 @@ nonisolated enum OTAProtocol {
         var frame = Data([BLEConstants.sof, command.rawValue, UInt8(payload.count)])
         frame.append(payload)
         frame.append(CRC8.checksum(of: frame))
+        
         return frame
     }
 
@@ -83,7 +84,9 @@ nonisolated enum OTAProtocol {
     }
 
     static func dataBatch(address: UInt32, payload: Data) throws -> Data {
-        guard payload.count > 0, payload.count.isMultiple(of: 8), payload.count <= Int(UInt8.max) else {
+        guard payload.count > 0,
+              payload.count.isMultiple(of: BLEConstants.batchPayloadMin),
+              payload.count <= Int(UInt8.max) else {
             throw OTAProtocolError.invalidBatchSize(payload.count)
         }
         var frame = Data((0..<4).map { UInt8(truncatingIfNeeded: address >> (8 * $0)) })

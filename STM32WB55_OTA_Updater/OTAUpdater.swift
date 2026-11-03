@@ -37,6 +37,7 @@ enum OTAOperationError: Error, LocalizedError {
     case timeout
     case connectionLost
     case notReady
+    case frameLargerThanLinkLimit
     case insufficientWriteLength(required: Int, available: Int)
     case deviceRejected(String)
 
@@ -45,6 +46,7 @@ enum OTAOperationError: Error, LocalizedError {
         case .timeout: "Timed out waiting for the device"
         case .connectionLost: "Connection lost"
         case .notReady: "Device is not ready for firmware updates"
+        case .frameLargerThanLinkLimit: "Frame larger than link limit"
         case .insufficientWriteLength(let required, let available):
             "BLE write limit is \(available) bytes; \(required) bytes are required"
         case .deviceRejected(let reason): reason
@@ -56,7 +58,10 @@ enum OTAOperationError: Error, LocalizedError {
 protocol OTATransport: AnyObject {
     var isReady: Bool { get }
     var batchPayloadSize: Int? { get }
+    var maxWriteNoResp: Int? { get }
+    var maxWriteWithResp: Int? { get }
 
+    func refreshLinkParameters()
     func sendCommandAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus
     func sendBatchAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus
     func disconnect()
@@ -78,6 +83,8 @@ final class OTAUpdater: ObservableObject {
     private var selectionTask: Task<Void, Never>?
     private var selectionID = UUID()
     private var connectionWasLost = false
+    private var requestedBatchPayloadSize: Int?
+    private var requiresFullBatch = false
 
     init(transport: OTATransport) {
         self.transport = transport
@@ -106,9 +113,11 @@ final class OTAUpdater: ObservableObject {
         }
     }
 
-    func start() {
+    func start(batchPayloadSize: Int? = nil, requireFullBatch: Bool = false) {
         guard !isUpdating, selectedFirmware != nil else { return }
         connectionWasLost = false
+        requestedBatchPayloadSize = batchPayloadSize
+        requiresFullBatch = requireFullBatch
         updateTask?.cancel()
         updateTask = Task { [weak self] in await self?.runUpdate() }
     }
@@ -140,6 +149,7 @@ final class OTAUpdater: ObservableObject {
 
     private func runUpdate() async {
         guard let image = selectedFirmware else { return }
+        transport.refreshLinkParameters()
         guard transport.isReady else {
             phase = .failed(OTAOperationError.notReady.localizedDescription)
             appendLog("Update could not start: device is not ready")
@@ -156,26 +166,44 @@ final class OTAUpdater: ObservableObject {
         defer { UIApplication.shared.isIdleTimerDisabled = false }
 
         do {
-            guard let batchPayloadSize = transport.batchPayloadSize else {
+            guard let maxBatchPayloadSize = transport.batchPayloadSize,
+                  let maxWriteNoResp = transport.maxWriteNoResp else {
                 throw OTAOperationError.notReady
             }
+            if requiresFullBatch && maxBatchPayloadSize < BLEConstants.batchPayloadTarget {
+                throw OTAOperationError.deviceRejected("Waiting for 128-byte link")
+            }
+            let batchPayloadSize = requestedBatchPayloadSize.map {
+                min($0, maxBatchPayloadSize)
+            } ?? maxBatchPayloadSize
+            guard batchPayloadSize >= BLEConstants.batchPayloadMin,
+                  batchPayloadSize.isMultiple(of: BLEConstants.batchPayloadMin) else {
+                throw OTAProtocolError.invalidBatchSize(batchPayloadSize)
+            }
+            let frameSize = batchPayloadSize + BLEConstants.batchOverhead
+            appendLog(
+                "Batch payload \(batchPayloadSize) B (maxWriteNoResp \(maxWriteNoResp), frame \(frameSize) B)"
+            )
 
-            try await sendCommand(OTAProtocol.setFirmwareSize(image.size), label: "Set firmware size")
-            guard BLEConstants.hashPartSize > 0 else {
-                throw OTAProtocolError.invalidHashPart(0)
-            }
-            let hashPartCount = (image.sha256.count + BLEConstants.hashPartSize - 1)
-                / BLEConstants.hashPartSize
-            for part in 0..<hashPartCount {
-                try await sendCommand(
-                    OTAProtocol.setFirmwareHashPart(
-                        part,
-                        hash: image.sha256,
-                        partSize: BLEConstants.hashPartSize
-                    ),
-                    label: "Set firmware hash part \(part + 1)"
-                )
-            }
+//            try await sendCommand(OTAProtocol.setFirmwareSize(image.size), label: "Set firmware size")
+//            let commandWriteLimit = min(
+//                transport.maxWriteWithResp ?? 0,
+//                BLEConstants.cmdCharacteristicLength
+//            )
+//            let hashPartSize = commandWriteLimit >= BLEConstants.hashPartSize + 5
+//                ? BLEConstants.hashPartSize
+//                : BLEConstants.fallbackHashPartSize
+//            let hashPartCount = (image.sha256.count + hashPartSize - 1) / hashPartSize
+//            for part in 0..<hashPartCount {
+//                try await sendCommand(
+//                    OTAProtocol.setFirmwareHashPart(
+//                        part,
+//                        hash: image.sha256,
+//                        partSize: hashPartSize
+//                    ),
+//                    label: "Set firmware hash part \(part + 1)"
+//                )
+//            }
 
             phase = .erasing
             try await sendCommand(
@@ -189,6 +217,10 @@ final class OTAUpdater: ObservableObject {
             for batch in try image.batches(size: batchPayloadSize) {
                 try Task.checkCancellation()
                 let frame = try OTAProtocol.dataBatch(address: batch.address, payload: batch.payload)
+                guard frame.count <= maxWriteNoResp,
+                      frame.count <= BLEConstants.dataCharacteristicLength else {
+                    throw OTAOperationError.frameLargerThanLinkLimit
+                }
                 try await sendBatchWithRetry(frame)
                 bytesSent += batch.firmwareBytesCount
                 progress = image.size == 0 ? 1 : Double(bytesSent) / Double(image.size)
@@ -225,6 +257,16 @@ final class OTAUpdater: ObservableObject {
         label: String,
         timeout: TimeInterval = 5
     ) async throws {
+        let availableLength = min(
+            transport.maxWriteWithResp ?? 0,
+            BLEConstants.cmdCharacteristicLength
+        )
+        guard frame.count <= availableLength else {
+            throw OTAOperationError.insufficientWriteLength(
+                required: frame.count,
+                available: availableLength
+            )
+        }
         appendLog("\(label)…")
         let status = try await transport.sendCommandAndWaitForStatus(frame, timeout: timeout)
         try validate(status)
@@ -279,16 +321,43 @@ final class MockOTATransport: OTATransport {
     }
 
     var isReady = true
-    var batchPayloadSize: Int? = BLEConstants.maximumBatchPayloadSize
+    var batchPayloadSize: Int? = BLEConstants.batchPayloadTarget
+    var maxWriteNoResp: Int? = BLEConstants.dataCharacteristicLength
+    var maxWriteWithResp: Int? = BLEConstants.cmdCharacteristicLength
     var responses: [Response] = []
     private(set) var writtenFrames: [Data] = []
 
+    func refreshLinkParameters() {
+        guard let maxWriteNoResp else {
+            batchPayloadSize = nil
+            return
+        }
+        batchPayloadSize = STM32WB55_OTA_Updater.batchPayloadSize(
+            maxWriteNoResp: maxWriteNoResp
+        )
+    }
+
     func sendCommandAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus {
-        try await respond(to: frame)
+        let availableLength = min(
+            maxWriteWithResp ?? 0,
+            BLEConstants.cmdCharacteristicLength
+        )
+        guard frame.count <= availableLength else {
+            throw OTAOperationError.insufficientWriteLength(
+                required: frame.count,
+                available: availableLength
+            )
+        }
+        return try await respond(to: frame)
     }
 
     func sendBatchAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus {
-        try await respond(to: frame)
+        guard let maxWriteNoResp,
+              frame.count <= maxWriteNoResp,
+              frame.count <= BLEConstants.dataCharacteristicLength else {
+            throw OTAOperationError.frameLargerThanLinkLimit
+        }
+        return try await respond(to: frame)
     }
 
     func disconnect() {

@@ -48,9 +48,18 @@ final class OTAProtocolTests: XCTestCase {
         let payload = Data(repeating: 0x5A, count: 8)
         let frame = try OTAProtocol.dataBatch(address: 0x12345678, payload: payload)
 
-        XCTAssertEqual(frame.count, BLEConstants.dataFrameOverhead + payload.count)
+        XCTAssertEqual(frame.count, BLEConstants.batchOverhead + payload.count)
         XCTAssertEqual(Array(frame.prefix(5)), [0x78, 0x56, 0x34, 0x12, 0x08])
         XCTAssertEqual(frame.last, CRC8.checksum(of: frame.dropLast()))
+    }
+
+    func testBatchPayloadSizeRespectsLinkAndCharacteristicLimits() {
+        XCTAssertEqual(batchPayloadSize(maxWriteNoResp: 20), 8)
+        XCTAssertEqual(batchPayloadSize(maxWriteNoResp: 134), 128)
+        XCTAssertEqual(batchPayloadSize(maxWriteNoResp: 153), 128)
+        XCTAssertEqual(batchPayloadSize(maxWriteNoResp: 182), 128)
+        XCTAssertEqual(batchPayloadSize(maxWriteNoResp: 5), 8)
+        XCTAssertEqual(batchPayloadSize(maxWriteNoResp: 140), 128)
     }
 
     func testStatusDecodingValidFrame() throws {
@@ -74,7 +83,7 @@ final class OTAProtocolTests: XCTestCase {
     }
 
     func testFirmwareBatchesPadFinalPayloadAndMaintainAlignment() throws {
-        let payloadSize = BLEConstants.maximumBatchPayloadSize
+        let payloadSize = BLEConstants.batchPayloadTarget
         let source = Data((0..<(payloadSize + 2)).map(UInt8.init))
         let image = try FirmwareImage(data: source)
         let batches = Array(try image.batches(size: payloadSize))
@@ -85,12 +94,25 @@ final class OTAProtocolTests: XCTestCase {
         XCTAssertEqual(batches[0].firmwareBytesCount, payloadSize)
         XCTAssertEqual(batches[1].address, UInt32(payloadSize))
         XCTAssertEqual(batches[1].firmwareBytesCount, 2)
+        XCTAssertEqual(batches[1].payload.count, 8)
         XCTAssertEqual(Array(batches[1].payload.prefix(2)), Array(source.suffix(2)))
         XCTAssertEqual(
             Array(batches[1].payload.dropFirst(2)),
-            Array(repeating: 0xFF, count: payloadSize - 2)
+            Array(repeating: 0xFF, count: 6)
         )
         XCTAssertEqual(batches[1].payload.count % 8, 0)
+    }
+
+    func testFirmwareBatchesUsePayloadAlignedFinalBatchAndAddress() throws {
+        let image = try FirmwareImage(data: Data(repeating: 0xA5, count: 1_000))
+        let batches = Array(try image.batches(size: 128))
+
+        XCTAssertEqual(batches.count, 8)
+        XCTAssertTrue(batches.prefix(7).allSatisfy { $0.payload.count == 128 })
+        XCTAssertEqual(batches[7].address, 896)
+        XCTAssertEqual(batches[7].firmwareBytesCount, 104)
+        XCTAssertEqual(batches[7].payload.count, 104)
+        XCTAssertEqual(batches[7].payload.suffix(8), Data(repeating: 0xA5, count: 8))
     }
 
     func testBatchSizeMustBeEightByteAligned() throws {
@@ -111,6 +133,90 @@ final class OTAProtocolTests: XCTestCase {
         XCTAssertEqual(updater.bytesSent, 10)
         XCTAssertEqual(updater.progress, 1)
         XCTAssertFalse(transport.isReady)
+    }
+
+    func testUpdaterUsesPayloadAllowedByMockLink() async {
+        for (writeLimit, expectedPayloadSize) in [(20, 8), (153, 128)] {
+            let transport = MockOTATransport()
+            transport.maxWriteNoResp = writeLimit
+            let updater = OTAUpdater(transport: transport)
+            updater.selectFirmware(Data(repeating: 0xA5, count: 1_000))
+            let isPrepared = await waitUntil { updater.selectedFirmware != nil }
+            XCTAssertTrue(isPrepared)
+
+            updater.start()
+            let isComplete = await waitUntil { updater.phase == .done }
+            XCTAssertTrue(isComplete)
+
+            let frames = transport.writtenFrames.filter {
+                $0.count > BLEConstants.batchOverhead
+                    && $0.count != 7
+                    && $0.count != 13
+                    && $0.count != 21
+            }
+            XCTAssertFalse(frames.isEmpty)
+            XCTAssertTrue(frames.allSatisfy {
+                $0.count <= writeLimit && $0.count <= BLEConstants.dataCharacteristicLength
+            })
+            XCTAssertEqual(frames.first?[4], UInt8(expectedPayloadSize))
+        }
+    }
+
+    func testUpdaterAbortsInsteadOfWritingFrameLargerThanLinkLimit() async {
+        let transport = MockOTATransport()
+        transport.maxWriteNoResp = 13
+        let updater = OTAUpdater(transport: transport)
+        updater.selectFirmware(Data(repeating: 0xA5, count: 8))
+        let isPrepared = await waitUntil { updater.selectedFirmware != nil }
+        XCTAssertTrue(isPrepared)
+
+        updater.start()
+        let didFail = await waitUntil {
+            if case .failed = updater.phase { return true }
+            return false
+        }
+
+        XCTAssertTrue(didFail)
+        XCTAssertEqual(updater.phase, .failed("Frame larger than link limit"))
+        XCTAssertFalse(transport.writtenFrames.contains { $0.count > 7 && $0[0] != BLEConstants.sof })
+    }
+
+    func testUpdaterUsesEightByteHashPartsWhenCommandWriteLimitIsTwenty() async {
+        let transport = MockOTATransport()
+        transport.maxWriteWithResp = 20
+        let updater = OTAUpdater(transport: transport)
+        updater.selectFirmware(Data(repeating: 0xA5, count: 8))
+        let isPrepared = await waitUntil { updater.selectedFirmware != nil }
+        XCTAssertTrue(isPrepared)
+
+        updater.start()
+        let isComplete = await waitUntil { updater.phase == .done }
+        XCTAssertTrue(isComplete)
+
+        let hashFrames = transport.writtenFrames.filter {
+            $0.first == BLEConstants.sof && $0.count > 3 && $0[1] == OTACommand.setFirmwareHash.rawValue
+        }
+        XCTAssertEqual(hashFrames.count, 4)
+        XCTAssertTrue(hashFrames.allSatisfy { $0.count == 13 && $0.count <= 20 })
+    }
+
+    func testMockTransportRejectsOversizedDataFrame() async throws {
+        let transport = MockOTATransport()
+        transport.maxWriteNoResp = 13
+        let frame = try OTAProtocol.dataBatch(
+            address: 0,
+            payload: Data(repeating: 0xFF, count: BLEConstants.batchPayloadMin)
+        )
+
+        do {
+            _ = try await transport.sendBatchAndWaitForStatus(frame, timeout: 1)
+            XCTFail("Expected frame larger than the link limit to be rejected")
+        } catch {
+            guard case OTAOperationError.frameLargerThanLinkLimit = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertTrue(transport.writtenFrames.isEmpty)
     }
 
     func testUpdaterRetriesBatchOnNackAndTimeout() async {

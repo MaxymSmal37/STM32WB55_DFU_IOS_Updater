@@ -10,8 +10,10 @@ nonisolated enum BLEConstants {
         CBUUID(string: String(format: "0000%04X-8E22-4541-9D4C-21EDAE82ED19", short))
     }
 
-    static let sysInfoService = uuid(0x1802)
-    static let transferService = uuid(0xA001)
+
+    static let sysInfoService   =  uuid(0x1802)
+    static let transferService  =  uuid(0xA001)
+
 
     static let bootloaderFwVer = uuid(0x2A25)
     static let wirelessFwInfo = uuid(0x2A28)
@@ -25,12 +27,30 @@ nonisolated enum BLEConstants {
     static let sof: UInt8 = 0xAA
     static let crcPolynomial: UInt8 = 0x07
     static let crcInitialValue: UInt8 = 0x00
-    static let maximumBatchPayloadSize = 128
-    static let dataFrameOverhead = 6
-    static let hashPartSize = 16 // Firmware-dependent: use 8 if CMD accepts at most 16 bytes.
+    static let batchPayloadTarget = 128
+    static let batchPayloadMin = 8
+    static let batchHeaderSize = 5
+    static let batchCRCSize = 1
+    static var batchOverhead: Int { batchHeaderSize + batchCRCSize }
+    static var fullFrameSize: Int { batchPayloadTarget + batchOverhead }
+    static let dataCharacteristicLength = 134
+    static let cmdCharacteristicLength = 23
+    static let mtuSettleDelayMs = 1000
+    static let hashPartSize = 16
+    static let fallbackHashPartSize = 8
 
     static let statusTimeout: TimeInterval = 5
     static let eraseTimeout: TimeInterval = 30
     static let writeTimeout: TimeInterval = 10
     static let maximumBatchRetries = 3
+}
+
+nonisolated func batchPayloadSize(
+    maxWriteNoResp: Int,
+    target: Int = BLEConstants.batchPayloadTarget
+) -> Int {
+    let limit = min(maxWriteNoResp, BLEConstants.dataCharacteristicLength)
+    let raw = min(target, limit - BLEConstants.batchOverhead)
+    let aligned = (raw / BLEConstants.batchPayloadMin) * BLEConstants.batchPayloadMin
+    return max(aligned, BLEConstants.batchPayloadMin)
 }

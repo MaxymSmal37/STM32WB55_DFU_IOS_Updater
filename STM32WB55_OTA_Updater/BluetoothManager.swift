@@ -17,6 +17,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var writeTimeoutTask: Task<Void, Never>?
     private var flowTimeoutTask: Task<Void, Never>?
     private var activeOperationTask: Task<Void, Never>?
+    private var mtuRefreshTask: Task<Void, Never>?
     weak var otaUpdater: OTAUpdater?
 
     @Published var devices: [DiscoveredPeripheral] = []
@@ -109,6 +110,8 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func resetConnectionState() {
+        mtuRefreshTask?.cancel()
+        mtuRefreshTask = nil
         fwVersion = "—"
         wirelessFwInfo = "—"
         serialNumber = "—"
@@ -130,6 +133,34 @@ final class BluetoothManager: NSObject, ObservableObject {
         hasDataCharacteristic = false
         hasStatusCharacteristic = false
         isStatusNotifying = false
+    }
+
+    func refreshLinkParameters() {
+        guard let peripheral = connectedPeripheral,
+              peripheral.state == .connected else {
+            return
+        }
+
+        let updatedMaxWriteNoResp = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        let updatedMaxWriteWithResp = peripheral.maximumWriteValueLength(for: .withResponse)
+        let updatedBatchPayloadSize = STM32WB55_OTA_Updater.batchPayloadSize(
+            maxWriteNoResp: updatedMaxWriteNoResp
+        )
+        let didChange = maxWriteNoResp != updatedMaxWriteNoResp
+            || maxWriteWithResp != updatedMaxWriteWithResp
+            || batchPayloadSize != updatedBatchPayloadSize
+
+        maxWriteNoResp = updatedMaxWriteNoResp
+        maxWriteWithResp = updatedMaxWriteWithResp
+        batchPayloadSize = updatedBatchPayloadSize
+
+        if didChange {
+            log(
+                "Link parameters: maxWriteNoResp \(updatedMaxWriteNoResp), "
+                    + "maxWriteWithResp \(updatedMaxWriteWithResp), "
+                    + "batch payload \(updatedBatchPayloadSize) B"
+            )
+        }
     }
 
     private func log(_ message: String) {
@@ -234,10 +265,11 @@ final class BluetoothManager: NSObject, ObservableObject {
               let maxWriteWithResp else {
             throw OTAOperationError.notReady
         }
-        guard frame.count <= maxWriteWithResp else {
+        let availableLength = min(maxWriteWithResp, BLEConstants.cmdCharacteristicLength)
+        guard frame.count <= availableLength else {
             throw OTAOperationError.insufficientWriteLength(
                 required: frame.count,
-                available: maxWriteWithResp
+                available: availableLength
             )
         }
         try await withTaskCancellationHandler {
@@ -298,19 +330,18 @@ final class BluetoothManager: NSObject, ObservableObject {
         }
         if isCommand {
             guard let maxWriteWithResp else { throw OTAOperationError.notReady }
-            guard frame.count <= maxWriteWithResp else {
+            let availableLength = min(maxWriteWithResp, BLEConstants.cmdCharacteristicLength)
+            guard frame.count <= availableLength else {
                 throw OTAOperationError.insufficientWriteLength(
                     required: frame.count,
-                    available: maxWriteWithResp
+                    available: availableLength
                 )
             }
         } else {
             guard let maxWriteNoResp else { throw OTAOperationError.notReady }
-            guard frame.count <= maxWriteNoResp else {
-                throw OTAOperationError.insufficientWriteLength(
-                    required: frame.count,
-                    available: maxWriteNoResp
-                )
+            guard frame.count <= maxWriteNoResp,
+                  frame.count <= BLEConstants.dataCharacteristicLength else {
+                throw OTAOperationError.frameLargerThanLinkLimit
             }
         }
 
@@ -341,6 +372,11 @@ final class BluetoothManager: NSObject, ObservableObject {
                             )
                             guard let dataCharacteristic = self.dataCharacteristic else {
                                 throw OTAOperationError.notReady
+                            }
+                            guard let maxWriteNoResp = self.maxWriteNoResp,
+                                  frame.count <= maxWriteNoResp,
+                                  frame.count <= BLEConstants.dataCharacteristicLength else {
+                                throw OTAOperationError.frameLargerThanLinkLimit
                             }
                             peripheral.writeValue(frame, for: dataCharacteristic, type: .withoutResponse)
                         }
@@ -395,23 +431,21 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         resetConnectionState()
         peripheral.delegate = self
-        maxWriteNoResp = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        maxWriteWithResp = peripheral.maximumWriteValueLength(for: .withResponse)
-        if let maxWriteNoResp {
-            let availablePayload = min(
-                BLEConstants.maximumBatchPayloadSize,
-                maxWriteNoResp - BLEConstants.dataFrameOverhead
-            )
-            batchPayloadSize = max(8, (availablePayload / 8) * 8)
-        }
-        log("Connected. Maximum write without response: \(maxWriteNoResp ?? 0) bytes")
-        log("Maximum write with response: \(maxWriteWithResp ?? 0) bytes")
-        if let batchPayloadSize {
-            log("Selected data batch payload: \(batchPayloadSize) bytes")
-        }
         connectedPeripheral = peripheral
         isConnecting = false
         peripheral.discoverServices(nil)
+        mtuRefreshTask = Task { [weak self, weak peripheral] in
+            do {
+                try await Task.sleep(for: .milliseconds(BLEConstants.mtuSettleDelayMs))
+            } catch {
+                return
+            }
+            guard let self, let peripheral,
+                  self.connectedPeripheral === peripheral else {
+                return
+            }
+            self.refreshLinkParameters()
+        }
     }
 
     func centralManager(
@@ -456,6 +490,7 @@ extension BluetoothManager: CBPeripheralDelegate {
             log("Service discovered: \(uuid)")
             peripheral.discoverCharacteristics(nil, for: service)
         }
+        refreshLinkParameters()
     }
 
     func peripheral(
@@ -544,6 +579,9 @@ extension BluetoothManager: CBPeripheralDelegate {
             log(characteristic.isNotifying
                 ? "STATUS notifications enabled"
                 : "STATUS notifications are disabled")
+            if characteristic.isNotifying {
+                refreshLinkParameters()
+            }
         }
     }
 

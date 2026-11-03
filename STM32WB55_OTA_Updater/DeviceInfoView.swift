@@ -4,6 +4,12 @@ import UniformTypeIdentifiers
 import UIKit
 
 struct DeviceInfoView: View {
+    private enum BatchMode: String, CaseIterable {
+        case auto = "Auto"
+        case require128 = "Require 128"
+        case manual = "Manual"
+    }
+
     @ObservedObject var ble: BluetoothManager
     @StateObject private var updater: OTAUpdater
     let device: DiscoveredPeripheral
@@ -14,6 +20,8 @@ struct DeviceInfoView: View {
     @State private var firmwareName: String?
     @State private var errorText: String?
     @State private var diagnosticsExpanded = false
+    @State private var batchMode = BatchMode.auto
+    @State private var manualBatchSize = BLEConstants.batchPayloadMin
 
     private let firmwareTypes: [UTType] = [UTType(filenameExtension: "bin"), .data].compactMap { $0 }
 
@@ -70,7 +78,10 @@ struct DeviceInfoView: View {
                 titleVisibility: .visible
             ) {
                 Button("Start Update", role: .destructive) {
-                    updater.start()
+                    updater.start(
+                        batchPayloadSize: batchMode == .manual ? selectedBatchPayloadSize : nil,
+                        requireFullBatch: batchMode == .require128
+                    )
                 }
                 Button("Cancel", role: .cancel) {}
             }
@@ -93,6 +104,11 @@ struct DeviceInfoView: View {
             }
             .onAppear {
                 ble.otaUpdater = updater
+            }
+            .onChange(of: ble.batchPayloadSize) { _, payloadSize in
+                if let payloadSize {
+                    manualBatchSize = min(manualBatchSize, max(BLEConstants.batchPayloadMin, payloadSize))
+                }
             }
         }
     }
@@ -135,8 +151,26 @@ struct DeviceInfoView: View {
                     )
                     InfoRow(
                         label: "Batch payload",
-                        value: ble.batchPayloadSize.map { "\($0) bytes" } ?? "Not available"
+                        value: ble.batchPayloadSize.map {
+                            "\($0 == BLEConstants.batchPayloadTarget ? "✅" : "⚠️") \($0) bytes"
+                        } ?? "Not available"
                     )
+                    if let payloadSize = ble.batchPayloadSize,
+                       payloadSize < BLEConstants.batchPayloadTarget {
+                        Text(
+                            "Link limited to \(payloadSize) bytes. Firmware must raise "
+                                + "CFG_BLE_MAX_ATT_MTU (≥ 137) to send 128-byte batches."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                    }
+                    Button {
+                        ble.refreshLinkParameters()
+                    } label: {
+                        Label("Re-check link", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(ble.connectedPeripheral == nil)
                     Divider()
                     InfoRow(label: "CMD characteristic", value: ble.hasCommandCharacteristic ? "✅ Found" : "❌ Not found")
                     InfoRow(label: "DATA characteristic", value: ble.hasDataCharacteristic ? "✅ Found" : "❌ Not found")
@@ -186,14 +220,30 @@ struct DeviceInfoView: View {
 
     private var updateCard: some View {
         Card(title: "Firmware Update", systemImage: "arrow.triangle.2.circlepath") {
-            if ble.maxWriteNoResp == 20 {
-                Label(
-                    "MTU is 23. Firmware must raise CFG_BLE_MAX_ATT_MTU. Transfer will be slow.",
-                    systemImage: "exclamationmark.triangle.fill"
+            Picker("Batch mode", selection: $batchMode) {
+                ForEach(BatchMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            if batchMode == .manual {
+                Stepper(
+                    "Manual payload: \(manualBatchSize) B",
+                    value: $manualBatchSize,
+                    in: BLEConstants.batchPayloadMin...manualBatchMaximum,
+                    step: BLEConstants.batchPayloadMin
                 )
-                .font(.footnote)
-                .foregroundStyle(.orange)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .font(.subheadline)
+            }
+            if let selectedBatchPayloadSize {
+                let batchCount = updater.selectedFirmware.map {
+                    (Int($0.size) + selectedBatchPayloadSize - 1) / selectedBatchPayloadSize
+                }
+                InfoRow(
+                    label: "Transfer",
+                    value: "\(selectedBatchPayloadSize) B × \(batchCount.map { String($0) } ?? "—") batches"
+                )
+                InfoRow(label: "Estimated time", value: etaText)
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -243,7 +293,7 @@ struct DeviceInfoView: View {
             if case .failed = updater.phase {
                 Button("Retry") {
                     if ble.isOTAReady {
-                        updater.start()
+                        startUpdate()
                     } else if ble.connectedPeripheral == nil {
                         ble.connect(device)
                     }
@@ -258,6 +308,10 @@ struct DeviceInfoView: View {
     }
 
     private var updateDisabledReason: String? {
+        if batchMode == .require128,
+           (ble.batchPayloadSize ?? 0) < BLEConstants.batchPayloadTarget {
+            return "Waiting for 128-byte link"
+        }
         if updater.selectedFirmware == nil { return "Select a firmware file to enable Update." }
         guard ble.connectedPeripheral != nil else { return "Connect to the device to enable Update." }
         if !ble.hasCommandCharacteristic { return "Waiting for the CMD characteristic." }
@@ -266,6 +320,30 @@ struct DeviceInfoView: View {
         if !ble.isStatusNotifying { return "Waiting for STATUS notifications to be enabled." }
         if !ble.isOTAReady { return "Waiting for the BLE connection to become ready." }
         return nil
+    }
+
+    private func startUpdate() {
+        updater.start(
+            batchPayloadSize: batchMode == .manual ? selectedBatchPayloadSize : nil,
+            requireFullBatch: batchMode == .require128
+        )
+    }
+
+    private var manualBatchMaximum: Int {
+        max(
+            BLEConstants.batchPayloadMin,
+            min(BLEConstants.batchPayloadTarget, ble.batchPayloadSize ?? BLEConstants.batchPayloadMin)
+        )
+    }
+
+    private var selectedBatchPayloadSize: Int? {
+        guard let maximum = ble.batchPayloadSize else { return nil }
+        switch batchMode {
+        case .auto, .require128:
+            return maximum
+        case .manual:
+            return min(manualBatchSize, maximum)
+        }
     }
 
     private var logCard: some View {
