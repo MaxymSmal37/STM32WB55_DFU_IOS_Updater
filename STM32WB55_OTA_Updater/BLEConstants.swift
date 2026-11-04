@@ -24,6 +24,10 @@ nonisolated enum BLEConstants {
     static let data = uuid(0xAC02)
     static let status = uuid(0xAC03)
 
+    static let flashSizeBytes = 0x0010_0000
+    static let flashPageSizeBytes = 0x1000
+    static let flashPageCount = flashSizeBytes / flashPageSizeBytes
+
     static let sof: UInt8 = 0xAA
     static let crcPolynomial: UInt8 = 0x07
     static let crcInitialValue: UInt8 = 0x00

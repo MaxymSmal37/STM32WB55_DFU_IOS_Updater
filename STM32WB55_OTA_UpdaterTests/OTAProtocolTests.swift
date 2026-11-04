@@ -70,6 +70,28 @@ final class OTAProtocolTests: XCTestCase {
         XCTAssertTrue(status.isSuccess)
     }
 
+    func testEraseStatusDecodingReportsPageAndProgress() throws {
+        let status = try OTAProtocol.decodeEraseStatus(Data([0x01, 0x80, 0x00, 0x00, 0x00]))
+
+        XCTAssertEqual(status.generalStatus, 0x01)
+        XCTAssertEqual(status.currentPageNumber, 128)
+        XCTAssertEqual(status.progress, 0.5)
+    }
+
+    func testEraseStatusProgressIsCappedAndRejectsInvalidLength() throws {
+        let complete = try OTAProtocol.decodeEraseStatus(Data([0, 0x01, 0x01, 0x00, 0x00]))
+        XCTAssertEqual(complete.progress, 1)
+
+        let widePageNumber = try OTAProtocol.decodeEraseStatus(
+            Data([0, 0x78, 0x56, 0x34, 0x12])
+        )
+        XCTAssertEqual(widePageNumber.currentPageNumber, 0x12345678)
+
+        XCTAssertThrowsError(try OTAProtocol.decodeEraseStatus(Data([0, 1, 0, 0]))) { error in
+            XCTAssertEqual(error as? OTAProtocolError, .invalidEraseStatusLength(4))
+        }
+    }
+
     func testStatusDecodingRejectsBadCRCAndBadStartByte() throws {
         XCTAssertThrowsError(try OTAProtocol.decodeStatus(Data([0xAA, 0, 0, 1, 0xFF]))) { error in
             XCTAssertEqual(error as? OTAProtocolError, .invalidStatusCRC)

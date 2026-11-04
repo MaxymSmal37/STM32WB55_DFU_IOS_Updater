@@ -599,6 +599,17 @@ extension BluetoothManager: CBPeripheralDelegate {
             return
         }
         if characteristic === statusCharacteristic {
+            if data.count == 5,
+               (try? OTAProtocol.decodeStatus(data)) == nil,
+               otaUpdater?.phase == .erasing {
+                do {
+                    let eraseStatus = try OTAProtocol.decodeEraseStatus(data)
+                    otaUpdater?.receiveEraseStatus(eraseStatus)
+                } catch {
+                    log("Invalid erase STATUS notification: \(error.localizedDescription)")
+                }
+                return
+            }
             do {
                 let status = try OTAProtocol.decodeStatus(data)
                 log("STATUS: error=\(status.errorCode), ack=\(status.acknowledgement)")

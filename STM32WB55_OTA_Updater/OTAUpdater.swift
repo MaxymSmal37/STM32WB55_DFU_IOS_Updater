@@ -71,6 +71,8 @@ protocol OTATransport: AnyObject {
 final class OTAUpdater: ObservableObject {
     @Published private(set) var phase: OTAUpdatePhase = .idle
     @Published private(set) var progress = 0.0
+    @Published private(set) var eraseProgress = 0.0
+    @Published private(set) var erasedPageNumber: UInt32 = 0
     @Published private(set) var bytesSent = 0
     @Published private(set) var speedBytesPerSec = 0.0
     @Published private(set) var eta: TimeInterval?
@@ -147,6 +149,11 @@ final class OTAUpdater: ObservableObject {
         firmwareLoadError = nil
     }
 
+    func receiveEraseStatus(_ status: OTAEraseStatus) {
+        guard phase == .erasing else { return }
+        eraseProgress = status.progress
+    }
+
     private func runUpdate() async {
         guard let image = selectedFirmware else { return }
         transport.refreshLinkParameters()
@@ -158,6 +165,8 @@ final class OTAUpdater: ObservableObject {
 
         phase = .preparing
         progress = 0
+        eraseProgress = 0
+        erasedPageNumber = 0
         bytesSent = 0
         speedBytesPerSec = 0
         eta = nil

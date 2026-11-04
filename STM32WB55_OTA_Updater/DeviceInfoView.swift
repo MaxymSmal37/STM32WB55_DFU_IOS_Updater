@@ -247,22 +247,33 @@ struct DeviceInfoView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
+                let displayedProgress = updater.phase == .erasing
+                    ? updater.eraseProgress
+                    : updater.progress
                 HStack(alignment: .top) {
                     Text(updater.phase.title)
                         .font(.subheadline)
                     Spacer(minLength: 8)
-                    Text("\(Int(updater.progress * 100))%")
+                    Text("\(Int(displayedProgress * 100))%")
                         .font(.system(.subheadline, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
-                ProgressView(value: updater.progress)
+                ProgressView(value: displayedProgress)
                     .tint(updater.phase == .done ? .green : .accentColor)
-                InfoRow(
-                    label: "Bytes",
-                    value: "\(ByteCountFormatter.string(fromByteCount: Int64(updater.bytesSent), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(updater.totalBytes), countStyle: .file))"
-                )
-                InfoRow(label: "Speed", value: String(format: "%.1f KB/s", updater.speedBytesPerSec / 1_024))
-                InfoRow(label: "ETA", value: etaText)
+                if updater.phase == .erasing {
+                    InfoRow(
+                        label: "Erase pages",
+                        value: "\(updater.erasedPageNumber) / \(BLEConstants.flashPageCount)"
+                    )
+                }
+                if updater.phase == .uploading {
+                    InfoRow(
+                        label: "Bytes",
+                        value: "\(ByteCountFormatter.string(fromByteCount: Int64(updater.bytesSent), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(updater.totalBytes), countStyle: .file))"
+                    )
+                    InfoRow(label: "Speed", value: String(format: "%.1f KB/s", updater.speedBytesPerSec / 1_024))
+                    InfoRow(label: "ETA", value: etaText)
+                }
             }
             .opacity(isUpdating || updater.progress > 0 ? 1 : 0.6)
 
