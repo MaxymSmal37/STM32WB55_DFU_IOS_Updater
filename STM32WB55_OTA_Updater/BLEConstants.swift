@@ -26,7 +26,7 @@ nonisolated enum BLEConstants {
 
     static let flashSizeBytes = 0x0010_0000
     static let flashPageSizeBytes = 0x1000
-    static let flashPageCount = flashSizeBytes / flashPageSizeBytes
+    static let flashPageCount = 120 //flashSizeBytes / flashPageSizeBytes
 
     static let sof: UInt8 = 0xAA
     static let crcPolynomial: UInt8 = 0x07

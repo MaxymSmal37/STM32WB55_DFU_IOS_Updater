@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreBluetooth
 import SwiftUI
 import UniformTypeIdentifiers
@@ -34,6 +35,10 @@ struct DeviceInfoView: View {
     }
 
     private var isUpdating: Bool { updater.isUpdating }
+    private var displayedProgress: Double {
+        updater.phase == .erasing ? updater.eraseProgress : updater.progress
+    }
+    private var displayedPercent: Int { Int(displayedProgress * 100) }
     private var allLogEntries: [String] { ble.logLines + updater.log }
     private var recentLogEntries: [String] { Array(allLogEntries.suffix(200)) }
     private var logText: String { recentLogEntries.joined(separator: "\n") }
@@ -247,14 +252,11 @@ struct DeviceInfoView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                let displayedProgress = updater.phase == .erasing
-                    ? updater.eraseProgress
-                    : updater.progress
                 HStack(alignment: .top) {
                     Text(updater.phase.title)
                         .font(.subheadline)
                     Spacer(minLength: 8)
-                    Text("\(Int(displayedProgress * 100))%")
+                    Text("\(displayedPercent)%")
                         .font(.system(.subheadline, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -276,6 +278,10 @@ struct DeviceInfoView: View {
                 }
             }
             .opacity(isUpdating || updater.progress > 0 ? 1 : 0.6)
+            .onChange(of: displayedPercent) { oldPercent, newPercent in
+                guard newPercent > oldPercent else { return }
+                playProgressTick()
+            }
 
             HStack(spacing: 12) {
                 Button {
@@ -326,6 +332,10 @@ struct DeviceInfoView: View {
         if updater.selectedFirmware == nil { return "Select a firmware file to enable Update." }
         guard ble.connectedPeripheral != nil else { return "Connect to the device to enable Update." }
         if !ble.hasCommandCharacteristic { return "Waiting for the CMD characteristic." }
+        if !ble.hasCommandNotifyProperty {
+            return "Bootloader CMD characteristic has no notify/indicate property; command acknowledgements cannot be received."
+        }
+        if !ble.isCommandNotifying { return "Waiting for CMD notifications to be enabled." }
         if !ble.hasDataCharacteristic { return "Waiting for the DATA characteristic." }
         if !ble.hasStatusCharacteristic { return "Waiting for the STATUS characteristic." }
         if !ble.isStatusNotifying { return "Waiting for STATUS notifications to be enabled." }
@@ -338,6 +348,11 @@ struct DeviceInfoView: View {
             batchPayloadSize: batchMode == .manual ? selectedBatchPayloadSize : nil,
             requireFullBatch: batchMode == .require128
         )
+    }
+
+    private func playProgressTick() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        AudioServicesPlaySystemSound(1104)
     }
 
     private var manualBatchMaximum: Int {

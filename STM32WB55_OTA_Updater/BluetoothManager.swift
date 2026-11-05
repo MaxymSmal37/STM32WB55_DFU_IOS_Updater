@@ -4,6 +4,11 @@ import Foundation
 
 @MainActor
 final class BluetoothManager: NSObject, ObservableObject {
+    private enum PendingKind {
+        case command
+        case batch
+    }
+
     private var central: CBCentralManager?
     private var commandCharacteristic: CBCharacteristic?
     private var dataCharacteristic: CBCharacteristic?
@@ -11,6 +16,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var serialCharacteristic: CBCharacteristic?
     private var hardwareRevisionCharacteristic: CBCharacteristic?
     private var pendingStatus: CheckedContinuation<OTAStatus, Error>?
+    private var pendingKind: PendingKind?
     private var pendingWrite: CheckedContinuation<Void, Error>?
     private var flowContinuation: CheckedContinuation<Void, Error>?
     private var statusTimeoutTask: Task<Void, Never>?
@@ -39,14 +45,17 @@ final class BluetoothManager: NSObject, ObservableObject {
     @Published private(set) var batchPayloadSize: Int?
     @Published private(set) var servicesFound: [String] = []
     @Published private(set) var hasCommandCharacteristic = false
+    @Published private(set) var hasCommandNotifyProperty = false
     @Published private(set) var hasDataCharacteristic = false
     @Published private(set) var hasStatusCharacteristic = false
+    @Published private(set) var isCommandNotifying = false
     @Published private(set) var isStatusNotifying = false
 
     var isOTAReady: Bool {
         guard let peripheral = connectedPeripheral,
               peripheral.state == .connected,
               hasCommandCharacteristic,
+              isCommandNotifying,
               hasDataCharacteristic,
               hasStatusCharacteristic,
               isStatusNotifying else {
@@ -130,8 +139,10 @@ final class BluetoothManager: NSObject, ObservableObject {
         batchPayloadSize = nil
         servicesFound.removeAll()
         hasCommandCharacteristic = false
+        hasCommandNotifyProperty = false
         hasDataCharacteristic = false
         hasStatusCharacteristic = false
+        isCommandNotifying = false
         isStatusNotifying = false
     }
 
@@ -228,6 +239,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private func finishStatus(_ result: Result<OTAStatus, Error>) {
         guard let continuation = pendingStatus else { return }
         pendingStatus = nil
+        pendingKind = nil
         statusTimeoutTask?.cancel()
         statusTimeoutTask = nil
         switch result {
@@ -262,15 +274,28 @@ final class BluetoothManager: NSObject, ObservableObject {
     private func writeCommand(_ frame: Data, timeout: TimeInterval) async throws {
         guard let peripheral = connectedPeripheral,
               let commandCharacteristic,
-              let maxWriteWithResp else {
+              commandCharacteristic.properties.contains(.write)
+                || commandCharacteristic.properties.contains(.writeWithoutResponse) else {
             throw OTAOperationError.notReady
         }
-        let availableLength = min(maxWriteWithResp, BLEConstants.cmdCharacteristicLength)
+        let isWriteWithResponse = commandCharacteristic.properties.contains(.write)
+        let writeLimit = isWriteWithResponse
+            ? maxWriteWithResp
+            : maxWriteNoResp
+        guard let writeLimit else { throw OTAOperationError.notReady }
+        let availableLength = min(writeLimit, BLEConstants.cmdCharacteristicLength)
         guard frame.count <= availableLength else {
             throw OTAOperationError.insufficientWriteLength(
                 required: frame.count,
                 available: availableLength
             )
+        }
+        log("CMD TX \(isWriteWithResponse ? "with response" : "without response"): \(rawHex(frame))")
+        if !isWriteWithResponse {
+            try await waitUntilCanWriteWithoutResponse(peripheral: peripheral, timeout: timeout)
+            peripheral.writeValue(frame, for: commandCharacteristic, type: .withoutResponse)
+            log("CMD write submitted without response; MCU receipt is not confirmed by BLE")
+            return
         }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -329,8 +354,14 @@ final class BluetoothManager: NSObject, ObservableObject {
             throw OTAOperationError.notReady
         }
         if isCommand {
-            guard let maxWriteWithResp else { throw OTAOperationError.notReady }
-            let availableLength = min(maxWriteWithResp, BLEConstants.cmdCharacteristicLength)
+            guard let commandCharacteristic else { throw OTAOperationError.notReady }
+            let writeLimit = commandCharacteristic.properties.contains(.write)
+                ? maxWriteWithResp
+                : commandCharacteristic.properties.contains(.writeWithoutResponse)
+                    ? maxWriteNoResp
+                    : nil
+            guard let writeLimit else { throw OTAOperationError.notReady }
+            let availableLength = min(writeLimit, BLEConstants.cmdCharacteristicLength)
             guard frame.count <= availableLength else {
                 throw OTAOperationError.insufficientWriteLength(
                     required: frame.count,
@@ -352,6 +383,7 @@ final class BluetoothManager: NSObject, ObservableObject {
                     return
                 }
                 pendingStatus = continuation
+                pendingKind = isCommand ? .command : .batch
                 statusTimeoutTask = Task { [weak self] in
                     do {
                         try await Task.sleep(for: .seconds(timeout))
@@ -394,6 +426,12 @@ final class BluetoothManager: NSObject, ObservableObject {
 extension BluetoothManager: OTATransport {
     func sendCommandAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus {
         try await sendAndWaitForStatus(frame, timeout: timeout, isCommand: true)
+    }
+
+    func sendCommandAndWaitForWrite(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus? {
+        guard isOTAReady else { throw OTAOperationError.notReady }
+        try await writeCommand(frame, timeout: timeout)
+        return nil
     }
 
     func sendBatchAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus {
@@ -512,6 +550,14 @@ extension BluetoothManager: CBPeripheralDelegate {
             if characteristic.uuid == BLEConstants.cmd {
                 commandCharacteristic = characteristic
                 hasCommandCharacteristic = true
+                log("CMD properties: 0x\(String(characteristic.properties.rawValue, radix: 16))")
+                if characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate) {
+                    hasCommandNotifyProperty = true
+                    peripheral.setNotifyValue(true, for: characteristic)
+                } else {
+                    hasCommandNotifyProperty = false
+                    log("CMD has no notify/indicate property: ACK cannot be received")
+                }
             } else if characteristic.uuid == BLEConstants.data {
                 dataCharacteristic = characteristic
                 hasDataCharacteristic = true
@@ -570,6 +616,13 @@ extension BluetoothManager: CBPeripheralDelegate {
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        if characteristic === commandCharacteristic {
+            isCommandNotifying = error == nil && characteristic.isNotifying
+            log(isCommandNotifying
+                ? "CMD notifications enabled"
+                : "CMD notifications unavailable: \(error?.localizedDescription ?? "disabled")")
+            return
+        }
         guard characteristic === statusCharacteristic else { return }
         if let error {
             isStatusNotifying = false
@@ -598,6 +651,19 @@ extension BluetoothManager: CBPeripheralDelegate {
             log("No value returned for \(characteristic.uuid)")
             return
         }
+        if characteristic === commandCharacteristic {
+            guard data.count == 1 else {
+                log("Unexpected CMD notification length: \(data.count)")
+                return
+            }
+            log("CMD ACK: \(rawHex(data))")
+            guard pendingStatus != nil, pendingKind == .command else {
+                log("Unsolicited CMD ACK ignored")
+                return
+            }
+            finishStatus(.success(OTAStatus(generalStatus: data[0], percent: 0)))
+            return
+        }
         if characteristic === statusCharacteristic {
             if data.count == 5,
                (try? OTAProtocol.decodeStatus(data)) == nil,
@@ -612,8 +678,12 @@ extension BluetoothManager: CBPeripheralDelegate {
             }
             do {
                 let status = try OTAProtocol.decodeStatus(data)
-                log("STATUS: error=\(status.errorCode), ack=\(status.acknowledgement)")
-                guard pendingStatus != nil else {
+                log("STATUS: generalStatus=\(status.generalStatus), percent=\(status.percent)")
+                guard pendingStatus != nil, pendingKind == .batch else {
+                    if otaUpdater?.phase == .erasing {
+                        otaUpdater?.receiveStatus(status)
+                        return
+                    }
                     log("Unsolicited STATUS notification ignored")
                     return
                 }
@@ -646,8 +716,13 @@ extension BluetoothManager: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         guard characteristic === commandCharacteristic else { return }
-        if let error { finishWrite(.failure(error)) }
-        else { finishWrite(.success(())) }
+        if let error {
+            log("CMD write failed: \(error.localizedDescription)")
+            finishWrite(.failure(error))
+        } else {
+            log("CMD write acknowledged by BLE")
+            finishWrite(.success(()))
+        }
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {

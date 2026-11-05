@@ -1,33 +1,28 @@
 import Foundation
 
 nonisolated enum OTACommand: UInt8 {
-    case startUpdate = 0
-    case stopUpdate = 1
-    case getStatus = 2
-    case setFirmwareSize = 3
-    case setFirmwareHash = 4
+    case startErase = 0
+    case startUpdate = 1
+    case stopUpdate = 2
+    case getStatus = 3
+    case setFirmwareSize = 4
+    case setFirmwareHash = 5
 }
 
 nonisolated struct OTAStatus: Equatable, Sendable {
-    let errorCode: UInt16
-    let acknowledgement: UInt8
-
-    var isSuccess: Bool { errorCode == 0 && acknowledgement == 1 }
-
-    var failureDescription: String {
-        switch errorCode {
-        case 0: "CRC failed"
-        case 1: "Hash set failed"
-        default: "Device error \(errorCode)"
-        }
-    }
-}
-
-nonisolated struct OTAEraseStatus: Equatable, Sendable {
     let generalStatus: UInt8
     let percent: UInt8                      // 0...100, computed by the MCU
 
     var progress: Double { Double(min(percent, 100)) / 100.0 }
+}
+
+nonisolated struct OTAEraseStatus: Equatable, Sendable {
+    let generalStatus: UInt8
+    let currentPageNumber: UInt32
+
+    var progress: Double {
+        min(Double(currentPageNumber) / Double(BLEConstants.flashPageCount), 1)
+    }
 }
 
 nonisolated enum OTAProtocolError: Error, LocalizedError, Equatable {
@@ -40,7 +35,6 @@ nonisolated enum OTAProtocolError: Error, LocalizedError, Equatable {
     case invalidBatchSize(Int)
     case imageTooLarge
     case deviceRejected(String)
-    case invalidErasePercent(Int)
 
 
     var errorDescription: String? {
@@ -54,8 +48,6 @@ nonisolated enum OTAProtocolError: Error, LocalizedError, Equatable {
         case .invalidBatchSize(let size): "Batch size must be a positive multiple of 8 (got \(size))"
         case .imageTooLarge: "Firmware image is too large for the protocol"
         case .deviceRejected(let reason): reason
-        case .invalidErasePercent(let value): "Invalid erase percentage: \(value)"
-            
         }
     }
 }
@@ -110,34 +102,25 @@ nonisolated enum OTAProtocol {
     }
     
     static func decodeStatus(_ frame: Data) throws -> OTAStatus {
-        guard frame.count == 5 else {
+        guard frame.count == 4 else {
             throw OTAProtocolError.invalidStatusLength(frame.count)
         }
         guard frame[0] == BLEConstants.sof else {
             throw OTAProtocolError.invalidStatusStartOfFrame
         }
-        guard CRC8.checksum(of: frame.prefix(4)) == frame[4] else {
+        guard CRC8.checksum(of: frame.prefix(3)) == frame[3] else {
             throw OTAProtocolError.invalidStatusCRC
         }
-        let errorCode = UInt16(frame[1]) | (UInt16(frame[2]) << 8)
-        return OTAStatus(errorCode: errorCode, acknowledgement: frame[3])
+        return OTAStatus(generalStatus: frame[1], percent: frame[2])
     }
     
-    static func decodeEraseStatus(_ data: Data) throws -> OTAEraseStatus
-    {
-//        guard data.count == 5 else {
-//            throw OTAProtocolError.invalidEraseStatusLength(data.count)
-//        }
-//        guard data[0] == BLEConstants.sof else {
-//            throw OTAProtocolError.invalidStatusStartOfFrame
-//        }
-//        guard CRC8.checksum(of: data.prefix(4)) == data[4] else {
-//            throw OTAProtocolError.invalidStatusCRC
-//        }
-//        // AB | status | percent | reserved | crc
-//        guard data[2] <= 100 else {
-//            throw OTAProtocolError.invalidErasePercent(Int(data[2]))
-//        }
-        return OTAEraseStatus(generalStatus: data[1], percent: data[2])
+    static func decodeEraseStatus(_ data: Data) throws -> OTAEraseStatus {
+        guard data.count == 5 else {
+            throw OTAProtocolError.invalidEraseStatusLength(data.count)
+        }
+        let currentPageNumber = data[1...4].enumerated().reduce(UInt32(0)) {
+            $0 | (UInt32($1.element) << (8 * $1.offset))
+        }
+        return OTAEraseStatus(generalStatus: data[0], currentPageNumber: currentPageNumber)
     }
 }

@@ -62,6 +62,7 @@ protocol OTATransport: AnyObject {
     var maxWriteWithResp: Int? { get }
 
     func refreshLinkParameters()
+    func sendCommandAndWaitForWrite(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus?
     func sendCommandAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus
     func sendBatchAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus
     func disconnect()
@@ -85,6 +86,7 @@ final class OTAUpdater: ObservableObject {
     private var selectionTask: Task<Void, Never>?
     private var selectionID = UUID()
     private var connectionWasLost = false
+    private var isFinalizingUpdate = false
     private var requestedBatchPayloadSize: Int?
     private var requiresFullBatch = false
 
@@ -118,6 +120,7 @@ final class OTAUpdater: ObservableObject {
     func start(batchPayloadSize: Int? = nil, requireFullBatch: Bool = false) {
         guard !isUpdating, selectedFirmware != nil else { return }
         connectionWasLost = false
+        isFinalizingUpdate = false
         requestedBatchPayloadSize = batchPayloadSize
         requiresFullBatch = requireFullBatch
         updateTask?.cancel()
@@ -134,6 +137,14 @@ final class OTAUpdater: ObservableObject {
 
     func connectionLost() {
         guard isUpdating else { return }
+        if isFinalizingUpdate, progress >= 1 {
+            connectionWasLost = true
+            updateTask?.cancel()
+            phase = .done
+            appendLog("Device disconnected while restarting after update")
+            UIApplication.shared.isIdleTimerDisabled = false
+            return
+        }
         connectionWasLost = true
         updateTask?.cancel()
         phase = .failed("Connection lost")
@@ -151,7 +162,20 @@ final class OTAUpdater: ObservableObject {
 
     func receiveEraseStatus(_ status: OTAEraseStatus) {
         guard phase == .erasing else { return }
+        erasedPageNumber = min(status.currentPageNumber, UInt32(BLEConstants.flashPageCount))
         eraseProgress = status.progress
+    }
+
+    func receiveStatus(_ status: OTAStatus) {
+        guard phase == .erasing else { return }
+        guard status.generalStatus == 0 else {
+            updateTask?.cancel()
+            phase = .failed("Flash erase failed on device")
+            appendLog("Device reported an erase fault")
+            return
+        }
+        eraseProgress = status.progress
+        erasedPageNumber = UInt32((status.progress * Double(BLEConstants.flashPageCount)).rounded())
     }
 
     private func runUpdate() async {
@@ -194,34 +218,37 @@ final class OTAUpdater: ObservableObject {
                 "Batch payload \(batchPayloadSize) B (maxWriteNoResp \(maxWriteNoResp), frame \(frameSize) B)"
             )
 
-//            try await sendCommand(OTAProtocol.setFirmwareSize(image.size), label: "Set firmware size")
-//            let commandWriteLimit = min(
-//                transport.maxWriteWithResp ?? 0,
-//                BLEConstants.cmdCharacteristicLength
-//            )
-//            let hashPartSize = commandWriteLimit >= BLEConstants.hashPartSize + 5
-//                ? BLEConstants.hashPartSize
-//                : BLEConstants.fallbackHashPartSize
-//            let hashPartCount = (image.sha256.count + hashPartSize - 1) / hashPartSize
-//            for part in 0..<hashPartCount {
-//                try await sendCommand(
-//                    OTAProtocol.setFirmwareHashPart(
-//                        part,
-//                        hash: image.sha256,
-//                        partSize: hashPartSize
-//                    ),
-//                    label: "Set firmware hash part \(part + 1)"
-//                )
-//            }
-
             phase = .erasing
-            try await sendCommand(
-                OTAProtocol.command(.startUpdate),
-                label: "Start update",
-                timeout: BLEConstants.eraseTimeout
+            let eraseStatus = try await sendCommandAndWaitForWrite(
+                OTAProtocol.command(.startErase),
+                label: "Erase flash"
             )
+            if let eraseStatus { receiveStatus(eraseStatus) }
+            try await waitForEraseCompletion()
+
+            try await sendCommand(OTAProtocol.setFirmwareSize(image.size), label: "Set firmware size")
+            let commandWriteLimit = min(
+                transport.maxWriteWithResp ?? 0,
+                BLEConstants.cmdCharacteristicLength
+            )
+            let hashPartSize = commandWriteLimit >= BLEConstants.hashPartSize + 5
+                ? BLEConstants.hashPartSize
+                : BLEConstants.fallbackHashPartSize
+            let hashPartCount = (image.sha256.count + hashPartSize - 1) / hashPartSize
+            // for part in 0..<hashPartCount {
+            //     try await sendCommand(
+            //         OTAProtocol.setFirmwareHashPart(
+            //             part,
+            //             hash: image.sha256,
+            //             partSize: hashPartSize
+            //         ),
+            //         label: "Set firmware hash part \(part + 1)"
+            //     )
+            // }
+            try await sendCommand(OTAProtocol.command(.startUpdate), label: "Start update")
 
             phase = .uploading
+            appendLog("Uploading firmware in batches of \(batchPayloadSize) bytes")
             let transferStart = Date()
             for batch in try image.batches(size: batchPayloadSize) {
                 try Task.checkCancellation()
@@ -240,6 +267,7 @@ final class OTAUpdater: ObservableObject {
             }
 
             phase = .verifying
+            isFinalizingUpdate = true
             try await sendCommand(
                 OTAProtocol.command(.stopUpdate),
                 label: "Stop update and verify",
@@ -255,6 +283,14 @@ final class OTAUpdater: ObservableObject {
                 appendLog("Update cancelled")
             }
         } catch {
+            if isFinalizingUpdate,
+               progress >= 1,
+               case OTAOperationError.connectionLost = error {
+                connectionWasLost = true
+                phase = .done
+                appendLog("Device disconnected while restarting after update")
+                return
+            }
             guard !connectionWasLost else { return }
             phase = .failed(error.localizedDescription)
             appendLog("Update failed: \(error.localizedDescription)")
@@ -282,6 +318,27 @@ final class OTAUpdater: ObservableObject {
         appendLog("\(label): acknowledged")
     }
 
+    private func waitForEraseCompletion() async throws {
+        guard eraseProgress < 1 else { return }
+        appendLog("Waiting for flash erase to complete")
+        let deadline = Date().addingTimeInterval(BLEConstants.eraseTimeout)
+        while eraseProgress < 1 {
+            try Task.checkCancellation()
+            guard Date() < deadline else { throw OTAOperationError.timeout }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private func sendCommandAndWaitForWrite(_ frame: Data, label: String) async throws -> OTAStatus? {
+        appendLog("\(label)…")
+        let status = try await transport.sendCommandAndWaitForWrite(
+            frame,
+            timeout: BLEConstants.writeTimeout
+        )
+        appendLog("\(label) sent; waiting for erase completion")
+        return status
+    }
+
     private func sendBatchWithRetry(_ frame: Data) async throws {
         for retry in 0...BLEConstants.maximumBatchRetries {
             do {
@@ -301,8 +358,8 @@ final class OTAUpdater: ObservableObject {
     }
 
     private func validate(_ status: OTAStatus) throws {
-        guard status.isSuccess else {
-            throw OTAOperationError.deviceRejected(status.failureDescription)
+        guard status.generalStatus == 0 else {
+            throw OTAOperationError.deviceRejected("Device status \(status.generalStatus)")
         }
     }
 
@@ -324,6 +381,7 @@ final class OTAUpdater: ObservableObject {
 final class MockOTATransport: OTATransport {
     enum Response {
         case acknowledge
+        case status(OTAStatus)
         case nack(UInt16)
         case timeout
         case disconnect
@@ -360,6 +418,21 @@ final class MockOTATransport: OTATransport {
         return try await respond(to: frame)
     }
 
+    func sendCommandAndWaitForWrite(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus? {
+        guard isReady else { throw OTAOperationError.connectionLost }
+        let availableLength = min(
+            maxWriteWithResp ?? 0,
+            BLEConstants.cmdCharacteristicLength
+        )
+        guard frame.count <= availableLength else {
+            throw OTAOperationError.insufficientWriteLength(
+                required: frame.count,
+                available: availableLength
+            )
+        }
+        return try await respond(to: frame)
+    }
+
     func sendBatchAndWaitForStatus(_ frame: Data, timeout: TimeInterval) async throws -> OTAStatus {
         guard let maxWriteNoResp,
               frame.count <= maxWriteNoResp,
@@ -379,9 +452,11 @@ final class MockOTATransport: OTATransport {
         let response = responses.isEmpty ? .acknowledge : responses.removeFirst()
         switch response {
         case .acknowledge:
-            return OTAStatus(errorCode: 0, acknowledgement: 1)
+            return OTAStatus(generalStatus: 0, percent: 100)
+        case .status(let status):
+            return status
         case .nack(let code):
-            return OTAStatus(errorCode: code, acknowledgement: 0)
+            return OTAStatus(generalStatus: UInt8(truncatingIfNeeded: code), percent: 0)
         case .timeout:
             throw OTAOperationError.timeout
         case .disconnect:

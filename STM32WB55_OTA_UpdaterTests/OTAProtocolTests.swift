@@ -11,8 +11,17 @@ final class OTAProtocolTests: XCTestCase {
     func testCommandEncodingIncludesLengthPayloadAndCRC() throws {
         let frame = try OTAProtocol.setFirmwareSize(0x12345678)
 
-        XCTAssertEqual(Array(frame.prefix(7)), [0xAA, 0x03, 0x04, 0x78, 0x56, 0x34, 0x12])
+        XCTAssertEqual(Array(frame.prefix(7)), [0xAA, 0x04, 0x04, 0x78, 0x56, 0x34, 0x12])
         XCTAssertEqual(frame.last, CRC8.checksum(of: frame.dropLast()))
+    }
+
+    func testCommandIDsMatchMCUEnum() {
+        XCTAssertEqual(OTACommand.startErase.rawValue, 0)
+        XCTAssertEqual(OTACommand.startUpdate.rawValue, 1)
+        XCTAssertEqual(OTACommand.stopUpdate.rawValue, 2)
+        XCTAssertEqual(OTACommand.getStatus.rawValue, 3)
+        XCTAssertEqual(OTACommand.setFirmwareSize.rawValue, 4)
+        XCTAssertEqual(OTACommand.setFirmwareHash.rawValue, 5)
     }
 
     func testSetFirmwareHashPartsEncodeEachHalf() throws {
@@ -24,6 +33,7 @@ final class OTAProtocolTests: XCTestCase {
         XCTAssertEqual(first.count, 21)
         XCTAssertEqual(Array(first[3..<20]), [0] + Array(0..<16).map(UInt8.init))
         XCTAssertEqual(Array(second[3..<20]), [1] + Array(16..<32).map(UInt8.init))
+        XCTAssertEqual(first[1], OTACommand.setFirmwareHash.rawValue)
         XCTAssertEqual(first.last, CRC8.checksum(of: first.dropLast()))
         XCTAssertEqual(second.last, CRC8.checksum(of: second.dropLast()))
     }
@@ -63,11 +73,22 @@ final class OTAProtocolTests: XCTestCase {
     }
 
     func testStatusDecodingValidFrame() throws {
-        var frame = Data([BLEConstants.sof, 0, 0, 1])
+        var frame = Data([BLEConstants.sof, 0, 50])
         frame.append(CRC8.checksum(of: frame))
 
         let status = try OTAProtocol.decodeStatus(frame)
-        XCTAssertTrue(status.isSuccess)
+        XCTAssertEqual(status.generalStatus, 0)
+        XCTAssertEqual(status.percent, 50)
+        XCTAssertEqual(status.progress, 0.5)
+    }
+
+    func testStatusProgressIsCappedAtOneHundredPercent() throws {
+        var frame = Data([BLEConstants.sof, 0, 101])
+        frame.append(CRC8.checksum(of: frame))
+
+        let status = try OTAProtocol.decodeStatus(frame)
+        XCTAssertEqual(status.percent, 101)
+        XCTAssertEqual(status.progress, 1)
     }
 
     func testEraseStatusDecodingReportsPageAndProgress() throws {
@@ -93,14 +114,20 @@ final class OTAProtocolTests: XCTestCase {
     }
 
     func testStatusDecodingRejectsBadCRCAndBadStartByte() throws {
-        XCTAssertThrowsError(try OTAProtocol.decodeStatus(Data([0xAA, 0, 0, 1, 0xFF]))) { error in
+        XCTAssertThrowsError(try OTAProtocol.decodeStatus(Data([0xAA, 0, 0, 0xFF]))) { error in
             XCTAssertEqual(error as? OTAProtocolError, .invalidStatusCRC)
         }
 
-        var badStart = Data([0, 0, 0, 1])
+        var badStart = Data([0, 0, 0])
         badStart.append(CRC8.checksum(of: badStart))
         XCTAssertThrowsError(try OTAProtocol.decodeStatus(badStart)) { error in
             XCTAssertEqual(error as? OTAProtocolError, .invalidStatusStartOfFrame)
+        }
+    }
+
+    func testStatusDecodingRejectsInvalidLength() {
+        XCTAssertThrowsError(try OTAProtocol.decodeStatus(Data([BLEConstants.sof, 0, 50]))) { error in
+            XCTAssertEqual(error as? OTAProtocolError, .invalidStatusLength(3))
         }
     }
 
@@ -157,6 +184,61 @@ final class OTAProtocolTests: XCTestCase {
         XCTAssertFalse(transport.isReady)
     }
 
+    func testUpdaterTreatsDisconnectDuringFinalizationAsSuccessfulRestart() async {
+        let transport = MockOTATransport()
+        transport.responses = [
+            .acknowledge,
+            .acknowledge,
+            .acknowledge,
+            .acknowledge,
+            .disconnect
+        ]
+        let updater = OTAUpdater(transport: transport)
+        updater.selectFirmware(Data(repeating: 0xA5, count: 8))
+        let isPrepared = await waitUntil { updater.selectedFirmware != nil }
+        XCTAssertTrue(isPrepared)
+
+        updater.start()
+        let isComplete = await waitUntil { updater.phase == .done }
+
+        XCTAssertTrue(isComplete)
+        XCTAssertEqual(updater.progress, 1)
+        XCTAssertTrue(updater.log.contains {
+            $0.contains("Device disconnected while restarting after update")
+        })
+    }
+
+    func testUpdaterWaitsForEraseProgressBeforeSendingBatches() async {
+        let transport = MockOTATransport()
+        transport.responses = [
+            .status(OTAStatus(generalStatus: 0, percent: 0)),
+            .acknowledge,
+            .acknowledge
+        ]
+        let updater = OTAUpdater(transport: transport)
+        updater.selectFirmware(Data(repeating: 0xA5, count: 8))
+        let isPrepared = await waitUntil { updater.selectedFirmware != nil }
+        XCTAssertTrue(isPrepared)
+
+        updater.start()
+        let isWaitingForErase = await waitUntil {
+            updater.log.contains { $0.contains("Waiting for flash erase to complete") }
+        }
+        XCTAssertTrue(isWaitingForErase)
+        XCTAssertEqual(transport.writtenFrames.count, 1)
+
+        updater.receiveStatus(OTAStatus(generalStatus: 0, percent: 106))
+        let isComplete = await waitUntil { updater.phase == .done }
+        XCTAssertTrue(isComplete)
+        let commandIDs = transport.writtenFrames
+            .filter { $0.first == BLEConstants.sof }
+            .map { $0[1] }
+        XCTAssertEqual(commandIDs.first, OTACommand.startErase.rawValue)
+        XCTAssertEqual(commandIDs.last, OTACommand.stopUpdate.rawValue)
+        XCTAssertTrue(commandIDs.contains(OTACommand.startUpdate.rawValue))
+        XCTAssertEqual(commandIDs.filter { $0 == OTACommand.startErase.rawValue }.count, 1)
+    }
+
     func testUpdaterUsesPayloadAllowedByMockLink() async {
         for (writeLimit, expectedPayloadSize) in [(20, 8), (153, 128)] {
             let transport = MockOTATransport()
@@ -171,10 +253,7 @@ final class OTAProtocolTests: XCTestCase {
             XCTAssertTrue(isComplete)
 
             let frames = transport.writtenFrames.filter {
-                $0.count > BLEConstants.batchOverhead
-                    && $0.count != 7
-                    && $0.count != 13
-                    && $0.count != 21
+                $0.first != BLEConstants.sof && $0.count > BLEConstants.batchOverhead
             }
             XCTAssertFalse(frames.isEmpty)
             XCTAssertTrue(frames.allSatisfy {
@@ -244,8 +323,8 @@ final class OTAProtocolTests: XCTestCase {
     func testUpdaterRetriesBatchOnNackAndTimeout() async {
         let transport = MockOTATransport()
         transport.responses = [
-            .acknowledge, .acknowledge, .acknowledge, .acknowledge,
-            .nack(0), .timeout, .nack(1), .acknowledge,
+            .acknowledge, .acknowledge, .acknowledge, .acknowledge, .acknowledge,
+            .nack(1), .timeout, .nack(1), .acknowledge,
             .acknowledge
         ]
         let updater = OTAUpdater(transport: transport)
@@ -256,7 +335,7 @@ final class OTAProtocolTests: XCTestCase {
         updater.start()
         let isComplete = await waitUntil { updater.phase == .done }
         XCTAssertTrue(isComplete)
-        XCTAssertEqual(transport.writtenFrames.count, 9)
+        XCTAssertEqual(transport.writtenFrames.count, 10)
         XCTAssertEqual(updater.bytesSent, 8)
     }
 
