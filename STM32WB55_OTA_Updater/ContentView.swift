@@ -33,6 +33,14 @@ struct ContentView: View {
                 }
                 .disabled(ble.isConnecting)
             }
+            .safeAreaInset(edge: .bottom) {
+                Text("Updater v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(.bar)
+            }
             .overlay {
                 if ble.devices.isEmpty {
                     ContentUnavailableView(
